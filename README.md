@@ -12,7 +12,7 @@ One-click Face Swapper and Restoration powered by [insightface](https://github.c
 
 ```bash
 # git clone this repository
-git clone https://github.com/haofanwang/inswapper.git
+git clone https://github.com/thebotnets/inswapper.git
 cd inswapper
 
 # create a Python venv
