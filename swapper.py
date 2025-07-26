@@ -35,6 +35,9 @@ except ImportError:
 
 
 def getFaceSwapModel(model_path: str):
+    # Use the provided model_path directly
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"model_file {model_path} should exist")
     model = insightface.model_zoo.get_model(model_path)
     return model
 
