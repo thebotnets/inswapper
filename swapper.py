@@ -1,3 +1,7 @@
+# This code block contains the corrected content for swapper.py.
+# You will need to copy this code and replace the content of the swapper.py file
+# in your Colab environment that is linked to your GitHub repository.
+
 """
 This project is developed by Haofan Wang to support face swap in single frame. Multi-frame will be supported soon!
 
@@ -13,6 +17,21 @@ import onnxruntime
 import numpy as np
 from PIL import Image
 from typing import List, Union, Dict, Set, Tuple
+
+# Import necessary modules for restoration (assuming they are in a 'restoration' module)
+# You may need to ensure the restoration.py file is also in your repository
+# and that necessary libraries like basicsr and torch are installed.
+try:
+    import torch
+    from basicsr.archs.restorations.arch import ARCH_REGISTRY
+    from basicsr.utils.realesrgan_utils import RealESRGANer
+    from basicsr.utils.face_restoration_helper import FaceRestoreHelper
+    from torchvision.transforms.functional import normalize
+    from restoration import set_realesrgan, face_restoration, check_ckpts
+    _restoration_available = True
+except ImportError:
+    print("Restoration modules not found. Face restoration and enhancement will be disabled.")
+    _restoration_available = False
 
 
 def getFaceSwapModel(model_path: str):
@@ -35,7 +54,7 @@ def get_one_face(face_analyser,
     except ValueError:
         return None
 
-    
+
 def get_many_faces(face_analyser,
                    frame:np.ndarray):
     """
@@ -61,33 +80,39 @@ def swap_face(face_swapper,
     target_face = target_faces[target_index]
 
     return face_swapper.get(temp_frame, target_face, source_face, paste_back=True)
- 
-    
+
+
 def process(source_img: Union[Image.Image, List],
             target_img: Image.Image,
             source_indexes: str,
             target_indexes: str,
-            model: str):
+            model: str, # Accept model path as an argument
+            face_restore=False, # Add arguments for restoration
+            background_enhance=False,
+            face_upsample=False,
+            upscale=1,
+            codeformer_fidelity=0.5):
+
     # load machine default available providers
     providers = onnxruntime.get_available_providers()
 
     # load face_analyser
     face_analyser = getFaceAnalyser(model, providers)
-    
+
     # load face_swapper
-    model_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), model)
-    face_swapper = getFaceSwapModel(model_path)
-    
+    # The problematic line is removed, use the provided model path directly
+    face_swapper = getFaceSwapModel(model)
+
     # read target image
-    target_img = cv2.cvtColor(np.array(target_img), cv2.COLOR_RGB2BGR)
-    
+    target_img_cv2 = cv2.cvtColor(np.array(target_img), cv2.COLOR_RGB2BGR)
+
     # detect faces that will be replaced in the target image
-    target_faces = get_many_faces(face_analyser, target_img)
+    target_faces = get_many_faces(face_analyser, target_img_cv2)
     num_target_faces = len(target_faces)
     num_source_images = len(source_img)
 
     if target_faces is not None:
-        temp_frame = copy.deepcopy(target_img)
+        temp_frame = copy.deepcopy(target_img_cv2)
         if isinstance(source_img, list) and num_source_images == num_target_faces:
             print("Replacing faces in target image from the left to the right by order")
             for i in range(num_target_faces):
@@ -188,12 +213,62 @@ def process(source_img: Union[Image.Image, List],
                         )
         else:
             raise Exception("Unsupported face configuration")
-        result = temp_frame
+
+        result_image_cv2 = temp_frame
+
+        # --- Apply Face Restoration and Enhancement if available and requested ---
+        if _restoration_available and (face_restore or background_enhance or face_upsample):
+             print("Applying face restoration and enhancement...")
+             try:
+                 # check and download CodeFormer models
+                 check_ckpts()
+
+                 # Set up CodeFormer and RealESRGAN
+                 upsampler = set_realesrgan()
+                 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+                 # Load CodeFormer model
+                 codeformer_net = ARCH_REGISTRY.get("CodeFormer")(dim_embd=512,
+                                                                 codebook_size=1024,
+                                                                 n_head=8,
+                                                                 n_layers=9,
+                                                                 connect_list=["32", "64", "128", "256"],
+                                                                ).to(device)
+                 ckpt_path = "/content/CodeFormer/CodeFormer/weights/CodeFormer/codeformer.pth" # Use absolute path
+                 if os.path.exists(ckpt_path):
+                     checkpoint = torch.load(ckpt_path)["params_ema"]
+                     codeformer_net.load_state_dict(checkpoint)
+                     codeformer_net.eval()
+                 else:
+                     print(f"CodeFormer model not found at {ckpt_path}. Skipping restoration.")
+                     codeformer_net = None # Ensure codeformer_net is None if model not found
+
+
+                 # Apply face restoration and enhancement
+                 if codeformer_net or upsampler: # Only attempt restoration if models are loaded
+                     result_image_cv2 = face_restoration(result_image_cv2,
+                                                        background_enhance=background_enhance,
+                                                        face_upsample=face_upsample,
+                                                        upscale=upscale,
+                                                        codeformer_fidelity=codeformer_fidelity,
+                                                        upsampler=upsampler,
+                                                        codeformer_net=codeformer_net,
+                                                        device=device)
+                 else:
+                     print("Skipping restoration as required models were not loaded.")
+
+
+             except Exception as e:
+                 print(f"An error occurred during face restoration and enhancement: {e}")
+                 # Continue with the swapped image even if restoration fails
+
+        result_image_pil = Image.fromarray(cv2.cvtColor(result_image_cv2, cv2.COLOR_BGR2RGB))
+
     else:
         print("No target faces found!")
-    
-    result_image = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    return result_image
+        result_image_pil = Image.fromarray(cv2.cvtColor(target_img_cv2, cv2.COLOR_BGR2RGB)) # Return original image if no faces found
+
+    return result_image_pil
 
 
 def parse_args():
@@ -203,6 +278,7 @@ def parse_args():
     parser.add_argument("--output_img", type=str, required=False, default="result.png", help="The path and filename of output image.")
     parser.add_argument("--source_indexes", type=str, required=False, default="-1", help="Comma separated list of the face indexes to use (left to right) in the source image, starting at 0 (-1 uses all faces in the source image")
     parser.add_argument("--target_indexes", type=str, required=False, default="-1", help="Comma separated list of the face indexes to swap (left to right) in the target image, starting at 0 (-1 swaps all faces in the target image")
+    parser.add_argument("--model", type=str, required=True, help="The path to the ONNX model file.") # Added model argument
     parser.add_argument("--face_restore", action="store_true", help="The flag for face restoration.")
     parser.add_argument("--background_enhance", action="store_true", help="The flag for background enhancement.")
     parser.add_argument("--face_upsample", action="store_true", help="The flag for face upsample.")
@@ -213,52 +289,28 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    
+
     args = parse_args()
-    
+
     source_img_paths = args.source_img.split(';')
     print("Source image paths:", source_img_paths)
     target_img_path = args.target_img
-    
+
     source_img = [Image.open(img_path) for img_path in source_img_paths]
     target_img = Image.open(target_img_path)
 
-    # download from https://huggingface.co/deepinsight/inswapper/tree/main
-    model = "./checkpoints/inswapper_128.onnx"
-    result_image = process(source_img, target_img, args.source_indexes, args.target_indexes, model)
-    
-    if args.face_restore:
-        from restoration import *
-        
-        # make sure the ckpts downloaded successfully
-        check_ckpts()
-        
-        # https://huggingface.co/spaces/sczhou/CodeFormer
-        upsampler = set_realesrgan()
-        device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
+    # Pass all arguments to the process function
+    result_image = process(source_img,
+                           target_img,
+                           args.source_indexes,
+                           args.target_indexes,
+                           args.model, # Pass model from args
+                           args.face_restore,
+                           args.background_enhance,
+                           args.face_upsample,
+                           args.upscale,
+                           args.codeformer_fidelity)
 
-        codeformer_net = ARCH_REGISTRY.get("CodeFormer")(dim_embd=512,
-                                                         codebook_size=1024,
-                                                         n_head=8,
-                                                         n_layers=9,
-                                                         connect_list=["32", "64", "128", "256"],
-                                                        ).to(device)
-        ckpt_path = "CodeFormer/CodeFormer/weights/CodeFormer/codeformer.pth"
-        checkpoint = torch.load(ckpt_path)["params_ema"]
-        codeformer_net.load_state_dict(checkpoint)
-        codeformer_net.eval()
-        
-        result_image = cv2.cvtColor(np.array(result_image), cv2.COLOR_RGB2BGR)
-        result_image = face_restoration(result_image, 
-                                        args.background_enhance, 
-                                        args.face_upsample, 
-                                        args.upscale, 
-                                        args.codeformer_fidelity,
-                                        upsampler,
-                                        codeformer_net,
-                                        device)
-        result_image = Image.fromarray(result_image)
-    
     # save result
     result_image.save(args.output_img)
     print(f'Result saved successfully: {args.output_img}')
